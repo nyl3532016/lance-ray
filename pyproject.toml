@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lance-ray"
-version = "0.2.0"
+version = "0.2.1+cmit"
 description = "Ray integration for Lance"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0",
-    "pylance>=2.0.0",
+    "pylance==2.0.1+cmit",
     "lance-namespace",
     "pyarrow>=17.0.0",
     "more_itertools>=2.6.0; python_version<'3.12'",
