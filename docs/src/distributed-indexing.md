@@ -80,8 +80,12 @@ The function returns an updated Lance dataset with the newly created index.
 #### Supported Index Types
 The following vector index types are supported for distributed building:
 - `IVF_FLAT`
-- `IVF_SQ`
 - `IVF_PQ`
+- `IVF_RQ`
+- `IVF_SQ`
+- `IVF_HNSW_FLAT`
+- `IVF_HNSW_PQ`
+- `IVF_HNSW_SQ`
 
 #### `create_index`
 
@@ -106,6 +110,7 @@ def create_index(
     sample_rate: int = 256,
     ivf_centroids: Optional["pyarrow.Array"] = None,
     pq_codebook: Optional["pyarrow.Array"] = None,
+    rabitq_model: Optional[str] = None,
     **kwargs: Any,
 ) -> "lance.LanceDataset":
 ```
@@ -116,7 +121,7 @@ def create_index(
 |-----------|------|-------------|
 | `uri` | `str` or `lance.LanceDataset`, optional | Lance dataset object, or its URI. Either `uri` OR (`namespace_impl` + `table_id`) must be provided when using URI mode. If you pass a `lance.LanceDataset` object, namespace parameters are ignored. |
 | `column` | `str` | Vector column name to index |
-| `index_type` | `str` | Vector index type (e.g., `"IVF_PQ"`, `"IVF_SQ"`, `"IVF_FLAT"`) |
+| `index_type` | `str` | Vector index type (e.g., `"IVF_PQ"`, `"IVF_RQ"`, `"IVF_SQ"`, `"IVF_FLAT"`) |
 | `name` | `str`, optional | Index name, auto-generated if not provided |
 | `replace` | `bool`, optional | Whether to replace existing index, default is `True` |
 | `num_workers` | `int`, optional | Number of Ray workers to use, default is 4 |
@@ -132,7 +137,20 @@ def create_index(
 | `sample_rate` | `int`, optional | Number of rows sampled per IVF partition and PQ centroid, default is 256 |
 | `ivf_centroids` | `pyarrow.Array`, optional | Pre-computed IVF centroids (advanced) |
 | `pq_codebook` | `pyarrow.Array`, optional | Pre-computed PQ codebook for PQ-based indices (advanced) |
+| `rabitq_model` | `str`, optional | Pre-built RaBitQ model for IVF_RQ. If omitted for IVF_RQ, Lance-Ray builds one shared model on the driver |
+| `num_bits` | `int`, optional | RaBitQ bits per vector dimension for IVF_RQ, default is 1. Passed through to Lance for validation |
 | `**kwargs` | `Any` | Additional arguments to pass through to Lance index creation |
+
+For `IVF_RQ`, Lance-Ray builds one shared RaBitQ rotation model on the driver
+when `rabitq_model` is not provided, then passes that same model to every
+fragment worker. To pin or reuse a model yourself, pass the JSON string returned
+by `lance.lance.indices.build_rq_model(...)` as `rabitq_model`.
+
+The RaBitQ model dimension is the vector column width and must be divisible by
+8. `num_bits` controls how many RaBitQ code bits are used per vector dimension:
+larger values can increase quantized-code fidelity at the cost of more index
+storage and memory. The default is 1, matching Lance's IVF_RQ default, and
+supported values are validated by Lance.
 
 #### Return Value
 
@@ -285,7 +303,7 @@ updated_dataset.scanner(filter="id = 100", columns=["id", "text"]).to_table()
 updated_dataset.scanner(filter="id >= 200 AND id < 800", columns=["id", "text"]).to_table()
 ```
 
-### Vector Index (IVF_PQ / IVF_SQ / IVF_FLAT)
+### Vector Index (IVF_PQ / IVF_RQ / IVF_SQ / IVF_FLAT)
 ```python
 import lance_ray as lr
 
@@ -310,6 +328,31 @@ updated_dataset = lr.create_index(
     name="idx_ivf_sq",
     num_workers=4,
     num_partitions=256,
+)
+
+# Build a distributed IVF_RQ index
+updated_dataset = lr.create_index(
+    uri="path/to/dataset.lance",
+    column="vector",
+    index_type="IVF_RQ",
+    name="idx_ivf_rq",
+    num_workers=4,
+    num_partitions=256,
+)
+
+# Or provide a pre-built shared RaBitQ model explicitly.
+from lance.lance import indices
+
+rabitq_model = indices.build_rq_model(dimension=128, num_bits=1)
+updated_dataset = lr.create_index(
+    uri="path/to/dataset.lance",
+    column="vector",
+    index_type="IVF_RQ",
+    name="idx_ivf_rq",
+    num_workers=4,
+    num_partitions=256,
+    num_bits=1,
+    rabitq_model=rabitq_model,
 )
 
 # Build a distributed IVF_FLAT index

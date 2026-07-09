@@ -191,6 +191,19 @@ def _put_vector_index_artifacts_in_object_store(
     )
 
 
+def _build_rabitq_model(*, dimension: int, num_bits: int = 1) -> str:
+    """Build one shared RaBitQ rotation model for distributed IVF_RQ shards.
+
+    ``dimension`` is the vector width and must satisfy Lance's IVF_RQ
+    requirement that it is divisible by 8. ``num_bits`` controls the number of
+    RaBitQ code bits per vector dimension and defaults to Lance's IVF_RQ default
+    of 1; supported values are validated by ``lance.lance.indices.build_rq_model``.
+    """
+    from lance.lance import indices
+
+    return indices.build_rq_model(dimension=dimension, num_bits=num_bits)
+
+
 _SCALAR_SEGMENT_INDEX_TYPES = {"BTREE", "BITMAP", "INVERTED", "FTS"}
 
 
@@ -751,6 +764,7 @@ def create_scalar_index(
 _VECTOR_INDEX_TYPES = {
     "IVF_FLAT",
     "IVF_PQ",
+    "IVF_RQ",
     "IVF_SQ",
     "IVF_HNSW_FLAT",
     "IVF_HNSW_PQ",
@@ -1167,6 +1181,7 @@ def create_index(
     pq_codebook: Optional[
         pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray
     ] = None,
+    rabitq_model: Optional[str] = None,
     **kwargs: Any,
 ) -> "lance.LanceDataset":
     """Build distributed vector indices with Ray.
@@ -1177,7 +1192,8 @@ def create_index(
     Args:
         uri: Lance dataset or URI to build index on
         column: Column name to index
-        index_type: Type of index to build (e.g., "IVF_PQ", "IVF_HNSW_PQ")
+        index_type: Type of index to build (e.g., "IVF_PQ", "IVF_RQ",
+            "IVF_HNSW_PQ")
         name: Name of the index (generated if None)
         replace: Whether to replace existing index with the same name (default: True)
         num_workers: Number of Ray workers to use (keyword-only)
@@ -1190,7 +1206,12 @@ def create_index(
         sample_rate: Number of rows sampled per IVF partition and PQ centroid (default: 256)
         ivf_centroids: Pre-computed IVF centroids (optional)
         pq_codebook: Pre-computed PQ codebook (optional)
-        **kwargs: Additional arguments to pass to the fragment index build entrypoint
+        rabitq_model: Pre-built RaBitQ model for IVF_RQ. If omitted, Lance-Ray
+            builds one shared model on the driver and sends it to every worker.
+            The model dimension is the vector column width and must be divisible
+            by 8. The ``num_bits`` keyword controls RaBitQ bits per vector
+            dimension and defaults to 1.
+        **kwargs: Additional arguments to pass to the fragment index build entrypoint.
 
     Returns:
         Updated Lance dataset with the index created
@@ -1279,9 +1300,13 @@ def create_index(
 
     ivf_centroids_artifact = ivf_centroids
     pq_codebook_artifact = pq_codebook
+    index_build_kwargs = dict(kwargs)
+    if rabitq_model is not None:
+        index_build_kwargs["rabitq_model"] = rabitq_model
 
     pq_index_types = {"IVF_PQ", "IVF_HNSW_PQ"}
     needs_pq = index_type_name in pq_index_types
+    needs_rq = index_type_name == "IVF_RQ"
 
     # Always perform global IVF training up front so that all shards share the
     # same centroids and number of partitions. The Ray entrypoint owns the
@@ -1333,6 +1358,18 @@ def create_index(
         num_sub_vectors = pq_model.num_subvectors
         logger.info("PQ training completed: num_sub_vectors=%d", num_sub_vectors)
 
+    if needs_rq and index_build_kwargs.get("rabitq_model") is None:
+        num_bits = index_build_kwargs.get("num_bits", 1)
+        logger.info(
+            "Building shared RaBitQ model: dimension=%d, num_bits=%s",
+            dimension,
+            num_bits,
+        )
+        index_build_kwargs["rabitq_model"] = _build_rabitq_model(
+            dimension=dimension,
+            num_bits=num_bits,
+        )
+
     if ivf_centroids_artifact is None:
         raise ValueError(
             "ivf_centroids must be provided or trainable for IVF-based "
@@ -1379,7 +1416,7 @@ def create_index(
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
             table_id=table_id,
-            **kwargs,
+            **index_build_kwargs,
         )
 
     results = _map_async_with_pool(
